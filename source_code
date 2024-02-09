@@ -1,0 +1,130 @@
+#include <ESP8266WiFi.h>
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+
+MAX30105 particleSensor;
+WiFiClient client;
+ 
+String apiKey = "XXXXX"; // Keep Your Channel API Key     
+ 
+const char *ssid =  "XXXXX";     // Keep your Wi-Fi Username
+const char *pass =  "xxxxx";     // Keep your Wi-Fi Password
+const char* server = "api.thingspeak.com";
+ 
+const byte RATE_SIZE = 4; 
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute;
+int beatAvg;
+float temperature;
+float vref = 3.3;
+float resolution = vref/1023;
+ 
+void setup()
+{
+  Serial.begin(9600);
+  delay(2000);
+  Serial.println("Connecting to ");             //trying to connect to the wi-fi
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  delay(2000);
+  Serial.println("Initializing...");
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST))                      //Throws an error if sensor is not found  and also initializes the I2C communication
+  {
+    Serial.println("Heart Beat sensor not found");
+    while (1);
+  }
+  Serial.println("Place your index finger on the sensor.");
+  particleSensor.setup(); 
+  particleSensor.setPulseAmplitudeRed(0x0A);                //Turn Red LED to low to indicate sensor is running
+  particleSensor.setPulseAmplitudeGreen(0);                 //Turn Green LED off
+  delay(2000);
+}
+  
+void loop()
+{
+  for(int i=0;i<500;i++)
+    Heart_Beat();                           //Calls Heart_Beat() function 500 times to calculate heart rate.
+  Serial.print("BPM=");
+  Serial.print(beatsPerMinute);
+  Serial.print(", Avg BPM=");
+  Serial.print(beatAvg); 
+  Serial.println();
+  temperature = analogRead(A0);                      //Reads the analog output from the temperature sensor
+  temperature = (temperature*resolution);
+  temperature = temperature*100+33.84;               //converting the analog output into temperature
+  Serial.print("Temperature: ");
+  Serial.println(temperature);
+  Update_Thingspeak();                       //Updating the values in thingspeak
+  delay(5000);
+}
+ 
+void Heart_Beat(){
+  long irValue = particleSensor.getIR();               //will take a reading and return the reflected amount of IR light
+  if (checkForBeat(irValue) == true)                   //checks whether a heartbeat has been detected or not, it will enter into the loop only if it has been detected
+  {
+    long delta = millis() - lastBeat;                  //The millis() function returns the number of milliseconds since the Arduino board began running its current program.
+    lastBeat = millis();
+    beatsPerMinute = (60 / (delta / 1000.0));         //calculating beats per minute
+    if (beatsPerMinute < 255 && beatsPerMinute > 20)
+    {
+      rates[rateSpot++] = (byte)beatsPerMinute; 
+      rateSpot %= RATE_SIZE; 
+      beatAvg = 0;                                             //this code segment ensures that valid heart rate values are stored in an array, computes the
+      for (byte x = 0 ; x < RATE_SIZE ; x++)                   //average heart rate over a defined period, and manages the indexing of the array to avoid overflowing.
+      beatAvg += rates[x];
+      beatAvg /= RATE_SIZE;
+    }
+  }
+    
+  if (irValue < 50000){                         // if the infrared value irValue falls below a certain threshold (50000 in this case),
+    beatsPerMinute = 0;                         //the code assumes that a valid heartbeat signal is not being received, and it resets 
+    beatAvg = 0;                                //the heart rate calculations to zero to indicate this condition.
+  }
+}
+ 
+void Update_Thingspeak(){
+  if (client.connect(server,80))            //The client.connect() function attempts to establish a connection to the specified server using the provided address and port number.server: This variable contains the address (URL or IP address) of the server to which the client wants to connect. In this case, it's set to "api.thingspeak.com", which is the ThingSpeak server address. 80: This parameter specifies the port number to which the client is connecting. Port 80 is the standard port for HTTP communication, which is typically used for web servers. In this context, ThingSpeak's API likely operates over HTTP, so port 80 is used for communication.
+  {                    
+    String line;
+    String postStr = apiKey;
+    postStr +="&field1=";                                       
+    postStr += String(temperature);
+    postStr +="&field2=";
+    postStr += String(beatsPerMinute);
+    postStr += "\r\n\r\n";                                  //postStr is constructed to contain data formatted as per the ThingSpeak API requirements, including the API key, temperature, and heart rate values, ready to be sent to the ThingSpeak server as part of an HTTP POST request.
+     
+    client.print("POST /update HTTP/1.1\n");
+    client.print("Host: api.thingspeak.com\n");
+    client.print("Connection: close\n");
+    client.print("X-THINGSPEAKAPIKEY: "+apiKey+"\n");
+    client.print("Content-Type: application/x-www-form-urlencoded\n");
+    client.print("Content-Length: ");
+    client.print(postStr.length());
+    client.print("\n\n");
+    client.print(postStr);                                        //these lines of code assemble and send an HTTP POST request to the ThingSpeak server, including headers specifying the request method, target endpoint, authentication information, content type, and content length, followed by the actual data to be submitted.
+   while (client.connected() || client.available())
+    {
+      if (client.available())
+      {
+        line = client.readString();
+      }
+    }                                                          // this loop continuously reads lines of text from the server response until the connection is closed or there is no more data available. Each line of text is stored in the line variable, allowing you to process and handle the server response as needed.
+    Serial.println(line);
+    client.stop();
+    Serial.println("\n[Disconnected]");                       //after reading and processing the server response, the code closes the connection with the server and prints a message indicating that the disconnection has occurred. This helps maintain the integrity of the program's network connections and provides feedback to the user via the serial monitor.     
+  }
+  else{
+    client.stop();
+    Serial.println("connection failed!]");
+  }
+}
